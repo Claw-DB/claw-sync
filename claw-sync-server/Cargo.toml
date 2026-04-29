@@ -1,0 +1,23 @@
+[package]
+name = "claw-sync-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Standalone sync hub binary for claw-sync"
+
+[[bin]]
+name = "claw-sync-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tokio-stream = "0.1"
+uuid = { version = "1", features = ["v4"] }
+claw-sync = { path = "../claw-sync" }

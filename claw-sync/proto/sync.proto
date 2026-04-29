@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package clawsync.v1;
+
+// ── Device & Registration ─────────────────────────────────────────────────────
+
+/// Identifies a registered device within a workspace.
+message DeviceInfo {
+  string device_id      = 1;
+  string workspace_id   = 2;
+  string public_key_b64 = 3;
+  int64  registered_at  = 4;
+  string client_version = 5;
+}
+
+/// Sent by a new device to register with the sync hub.
+message RegisterDeviceRequest {
+  DeviceInfo device          = 1;
+  bytes      signed_challenge = 2;
+}
+
+/// Hub response to a device registration request.
+message RegisterDeviceResponse {
+  bool   accepted           = 1;
+  string assigned_device_id = 2;
+  bytes  server_public_key  = 3;
+}
+
+// ── Sync Cursor & Delta Chunks ────────────────────────────────────────────────
+
+/// Opaque cursor that identifies a point in the sync history for a device.
+message SyncCursor {
+  string workspace_id  = 1;
+  string device_id     = 2;
+  int64  lamport_clock = 3;
+  string hlc_timestamp = 4;
+  bytes  state_hash    = 5;
+}
+
+/// A single chunk of an encrypted, compressed delta payload.
+message DeltaChunk {
+  string chunk_id           = 1;
+  int32  seq                = 2;
+  int32  total              = 3;
+  bytes  encrypted_payload  = 4;
+  bytes  payload_hash       = 5;
+  string entity_type        = 6;
+}
+
+/// Client-to-hub: stream of delta chunks with the originating cursor.
+message PushRequest {
+  SyncCursor          cursor = 1;
+  repeated DeltaChunk chunks = 2;
+}
+
+/// Hub-to-client: acknowledgement for a pushed batch.
+message PushResponse {
+  bool              accepted           = 1;
+  SyncCursor        server_cursor      = 2;
+  repeated string   rejected_chunk_ids = 3;
+  string            reason             = 4;
+}
+
+// ── Pull ──────────────────────────────────────────────────────────────────────
+
+/// Client-to-hub: request to pull deltas newer than the supplied cursor.
+message PullRequest {
+  SyncCursor      client_cursor = 1;
+  string          workspace_id  = 2;
+  repeated string entity_types  = 3;
+  int32           max_chunks    = 4;
+}
+
+/// Hub-to-client: a page of delta chunks from the hub.
+message PullResponse {
+  repeated DeltaChunk chunks        = 1;
+  SyncCursor          server_cursor = 2;
+  bool                has_more      = 3;
+}
+
+// ── Conflict Resolution ───────────────────────────────────────────────────────
+
+/// Describes a single conflicting entity between local and remote state.
+message ConflictRecord {
+  string entity_id    = 1;
+  string entity_type  = 2;
+  bytes  local_value  = 3;
+  bytes  remote_value = 4;
+  string local_hlc    = 5;
+  string remote_hlc   = 6;
+}
+
+/// Client-to-hub: submit resolved conflict records.
+message ResolveConflictRequest {
+  string                  workspace_id = 1;
+  repeated ConflictRecord resolved     = 2;
+}
+
+/// Hub-to-client: acknowledgement for conflict resolution.
+message ResolveConflictResponse {
+  bool ok = 1;
+}
+
+// ── Heartbeat ─────────────────────────────────────────────────────────────────
+
+/// Periodic liveness probe sent by the client.
+message HeartbeatRequest {
+  string device_id    = 1;
+  string workspace_id = 2;
+  int64  timestamp    = 3;
+}
+
+/// Hub response to a heartbeat probe.
+message HeartbeatResponse {
+  int64 server_time   = 3;
+  bool  sync_required = 4;
+}
+
+// ── Reconciliation ────────────────────────────────────────────────────────────
+
+/// Client-to-hub: full hash-set comparison for reconciliation.
+message ReconcileRequest {
+  string                  workspace_id   = 1;
+  string                  device_id      = 2;
+  repeated EntityHashEntry entity_hashes = 3;
+}
+
+/// A content-addressed hash entry for a single entity.
+message EntityHashEntry {
+  string entity_id    = 1;
+  bytes  content_hash = 2;
+  string entity_type  = 3;
+}
+
+/// Hub-to-client: reconciliation diff result.
+message ReconcileResponse {
+  repeated string missing_on_client = 1;
+  repeated string missing_on_server = 2;
+  repeated string conflicted        = 3;
+}
+
+// ── Service ───────────────────────────────────────────────────────────────────
+
+/// Primary gRPC service for the claw-sync protocol.
+service SyncService {
+  /// Register a new device with the sync hub.
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+
+  /// Push local deltas to the hub (client-streaming, server-streaming).
+  rpc Push(stream PushRequest) returns (stream PushResponse);
+
+  /// Pull remote deltas from the hub (server-streaming).
+  rpc Pull(PullRequest) returns (stream PullResponse);
+
+  /// Run a full entity-hash reconciliation pass.
+  rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
+
+  /// Submit resolved conflict records.
+  rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
+
+  /// Periodic heartbeat / keepalive.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
