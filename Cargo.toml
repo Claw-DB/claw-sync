@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "claw-sync",
+    "claw-sync-server",
+]
+exclude = ["claw-core"]
+resolver = "2"
