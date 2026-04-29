@@ -21,7 +21,9 @@ impl HlcTimestamp {
         let wall_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
-            .unwrap_or(last.wall_ms);
+            // If the system clock is unavailable, advance wall time by 1 ms so the
+            // counter does not accumulate unboundedly.
+            .unwrap_or(last.wall_ms + 1);
         if wall_ms > last.wall_ms {
             Self { wall_ms, counter: 0, node_id }
         } else {
