@@ -11,6 +11,8 @@ pub struct SyncStream {
 impl SyncStream {
     /// Open a new bidirectional sync streaming session.
     pub async fn open(session_id: impl Into<String>) -> SyncResult<Self> {
-        Ok(Self { session_id: session_id.into() })
+        Ok(Self {
+            session_id: session_id.into(),
+        })
     }
 }

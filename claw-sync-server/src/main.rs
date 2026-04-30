@@ -17,9 +17,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build and start the gRPC server.
     tonic::transport::Server::builder()
-        .add_service(claw_sync::proto::clawsync::v1::sync_service_server::SyncServiceServer::new(
-            HubService,
-        ))
+        .add_service(
+            claw_sync::proto::clawsync::v1::sync_service_server::SyncServiceServer::new(HubService),
+        )
         .serve(addr)
         .await?;
 
@@ -30,13 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct HubService;
 
 use claw_sync::proto::clawsync::v1::{
-    sync_service_server::SyncService,
-    HeartbeatRequest, HeartbeatResponse,
-    PullRequest, PullResponse,
-    PushRequest, PushResponse,
-    ReconcileRequest, ReconcileResponse,
-    RegisterDeviceRequest, RegisterDeviceResponse,
-    ResolveConflictRequest, ResolveConflictResponse,
+    sync_service_server::SyncService, HeartbeatRequest, HeartbeatResponse, PullRequest,
+    PullResponse, PushRequest, PushResponse, ReconcileRequest, ReconcileResponse,
+    RegisterDeviceRequest, RegisterDeviceResponse, ResolveConflictRequest, ResolveConflictResponse,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -110,6 +106,9 @@ impl SyncService for HubService {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        Ok(Response::new(HeartbeatResponse { server_time, sync_required: false }))
+        Ok(Response::new(HeartbeatResponse {
+            server_time,
+            sync_required: false,
+        }))
     }
 }

@@ -6,8 +6,8 @@ use claw_sync::engine::SyncEngine;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    let config = SyncConfig::from_env()?;
-    let engine = SyncEngine::new(config).await?;
+    let _config = SyncConfig::from_env()?;
+    let engine = SyncEngine::from_env().await?;
     engine.run().await?;
     Ok(())
 }

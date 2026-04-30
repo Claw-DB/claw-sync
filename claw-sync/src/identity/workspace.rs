@@ -16,6 +16,9 @@ impl WorkspaceIdentity {
     pub fn derive(master_secret: &[u8], workspace_id: Uuid) -> Self {
         let context = format!("claw-sync:workspace:{workspace_id}");
         let key = blake3::derive_key(&context, master_secret);
-        Self { workspace_id, shared_key: key }
+        Self {
+            workspace_id,
+            shared_key: key,
+        }
     }
 }
