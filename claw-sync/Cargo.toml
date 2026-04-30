@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tonic = "0.12"
+tonic = { version = "0.12", features = ["transport", "tls-roots"] }
 prost = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,15 +27,18 @@ chrono = { version = "0.4", features = ["serde"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
 sodiumoxide = "0.2"
 blake3 = "1.5"
+base64 = "0.22"
 lz4_flex = "0.11"
 async-trait = "0.1"
 tokio-stream = "0.1"
 futures = "0.3"
 backoff = { version = "0.4", features = ["tokio"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
 dashmap = "6"
 arc-swap = "1"
-claw-core = { path = "../claw-core" }
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -44,3 +47,8 @@ tonic-build = "0.12"
 tempfile = "3"
 tokio-test = "0.4"
 rstest = "0.21"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "sync_bench"
+harness = false
