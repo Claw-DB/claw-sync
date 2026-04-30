@@ -2,12 +2,18 @@
 
 use thiserror::Error;
 
+use crate::proto::clawsync::v1::ConflictRecord;
+
 /// All error conditions that can arise within claw-sync.
 #[derive(Debug, Error)]
 pub enum SyncError {
     /// A required configuration value was missing or invalid.
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// Input data or persisted state was malformed or semantically invalid.
+    #[error("validation error: {0}")]
+    Validation(String),
 
     /// A transport-layer error (e.g. gRPC or network failure).
     #[error("transport error: {0}")]
@@ -20,6 +26,10 @@ pub enum SyncError {
     /// A database operation failed.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+
+    /// A SQL migration failed.
+    #[error("migration error: {0}")]
+    Migration(#[from] sqlx::migrate::MigrateError),
 
     /// A serialisation or deserialisation failure.
     #[error("serialisation error: {0}")]
@@ -34,6 +44,8 @@ pub enum SyncError {
     ConflictEscalation {
         /// The entity whose conflict could not be resolved automatically.
         entity_id: String,
+        /// Full conflict details for subscribers and manual resolution.
+        record: ConflictRecord,
     },
 }
 
