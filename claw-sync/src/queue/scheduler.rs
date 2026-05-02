@@ -24,8 +24,8 @@ impl RetryScheduler {
     pub fn next_retry_delay(&self, attempt: u32) -> Duration {
         let base_ms = self.config.retry_base_ms.max(1);
         let exponential_ms = base_ms.saturating_mul(2_u64.saturating_pow(attempt.min(20)));
-        let jitter_ms = rand::thread_rng().gen_range(0..=base_ms);
-        Duration::from_millis((exponential_ms.saturating_add(jitter_ms)).min(300_000))
+        let jitter_ms = rand::thread_rng().gen_range(0..base_ms);
+        Duration::from_millis((exponential_ms.saturating_add(jitter_ms)).min(30_000))
     }
 
     /// Returns `true` when another retry should be attempted.
@@ -41,14 +41,14 @@ impl RetryScheduler {
                 .max(1)
                 .saturating_mul(2_u64.saturating_pow(op.attempt_count.min(20))),
         )
-        .min(Duration::from_secs(300));
-        let max_interval = Duration::from_secs(300);
+        .min(Duration::from_secs(30));
+        let max_interval = Duration::from_secs(30);
         let max_elapsed_ms = config
             .retry_base_ms
             .max(1)
             .saturating_mul(2_u64.saturating_pow(config.max_retries.min(20)))
             .saturating_mul(u64::from(config.max_retries.max(1)))
-            .min(300_000_u64.saturating_mul(u64::from(config.max_retries.max(1))));
+            .min(30_000_u64.saturating_mul(u64::from(config.max_retries.max(1))));
         let max_elapsed = Some(Duration::from_millis(max_elapsed_ms));
 
         ExponentialBackoffBuilder::new()

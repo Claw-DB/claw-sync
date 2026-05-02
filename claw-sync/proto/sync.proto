@@ -82,6 +82,7 @@ message PullResponse {
 
 /// Describes a single conflicting entity between local and remote state.
 message ConflictRecord {
+  string conflict_id  = 7;
   string entity_id    = 1;
   string entity_type  = 2;
   bytes  local_value  = 3;

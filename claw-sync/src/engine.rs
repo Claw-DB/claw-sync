@@ -1,7 +1,7 @@
 //! engine.rs — `SyncEngine`: top-level coordinator and lifecycle manager for claw-sync.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
@@ -351,6 +351,30 @@ impl SyncEngine {
             Ok(())
         }));
 
+        let audit_verify_engine = self.clone();
+        handles.push(tokio::spawn(async move {
+            let mut ticker = time::interval(Duration::from_secs(6 * 60 * 60));
+            loop {
+                tokio::select! {
+                    _ = audit_verify_engine.shutdown.cancelled() => break,
+                    _ = ticker.tick() => {
+                        match audit_verify_engine.verify_audit_log().await {
+                            Ok(result) if !result.ok => {
+                                tracing::warn!(
+                                    first_broken_at = ?result.first_broken_at,
+                                    reason = ?result.broken_reason,
+                                    "audit verification detected chain break"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => tracing::warn!(error = %error, "audit verification task failed"),
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }));
+
         let shutdown_engine = self.clone();
         handles.push(tokio::spawn(async move {
             tokio::select! {
@@ -449,7 +473,7 @@ impl SyncEngine {
                 entity_id: _,
                 record,
             }) => {
-                let record_for_event = record.clone();
+                let record_for_event = (*record).clone();
                 let _ = self
                     .event_tx
                     .send(SyncEvent::ConflictDetected(record_for_event));
@@ -813,6 +837,6 @@ fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     }
 }
 
-fn registration_path(data_dir: &PathBuf) -> PathBuf {
+fn registration_path(data_dir: &Path) -> PathBuf {
     data_dir.join(REGISTRATION_FILE_NAME)
 }

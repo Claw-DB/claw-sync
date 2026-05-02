@@ -1,6 +1,7 @@
 //! resolver.rs — conflict resolution strategies: LWW, merge, and manual escalation.
 
 use serde_json::{Map, Value};
+use sqlx::SqlitePool;
 
 use crate::{
     crdt::{clock::HlcTimestamp, ops::CrdtOp},
@@ -74,6 +75,85 @@ impl ConflictResolver {
             .map(|(local, remote)| self.resolve(&local, &remote))
             .collect()
     }
+
+    /// Resolves a persisted conflict manually and applies the chosen value to local state.
+    pub async fn resolve_manual(
+        &self,
+        pool: &SqlitePool,
+        conflict_id: &str,
+        chosen_value: &Value,
+        reason: &str,
+    ) -> SyncResult<()> {
+        let row = sqlx::query_as::<_, ManualConflictRow>(
+            "SELECT id, entity_type, entity_id, field_path FROM conflicts WHERE id = ? AND resolved = 0",
+        )
+        .bind(conflict_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| SyncError::Validation(format!("unknown unresolved conflict_id: {conflict_id}")))?;
+
+        apply_manual_value(pool, &row, chosen_value).await?;
+        sqlx::query(
+            "UPDATE conflicts
+             SET resolved = 1, resolution = ?, resolved_at = ?
+             WHERE id = ?",
+        )
+        .bind(reason)
+        .bind(chrono::Utc::now().timestamp_millis())
+        .bind(conflict_id)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ManualConflictRow {
+    id: String,
+    entity_type: String,
+    entity_id: String,
+    field_path: String,
+}
+
+async fn apply_manual_value(
+    pool: &SqlitePool,
+    row: &ManualConflictRow,
+    chosen_value: &Value,
+) -> SyncResult<()> {
+    let _ = &row.id;
+    let table = match row.entity_type.as_str() {
+        "memory_records" => "memory_records",
+        "sessions" => "sessions",
+        "tool_outputs" => "tool_outputs",
+        other => {
+            return Err(SyncError::Validation(format!(
+                "manual conflict resolution is not supported for entity type: {other}"
+            )))
+        }
+    };
+
+    let column = row.field_path.split('.').next_back().unwrap_or("payload");
+    if !column
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err(SyncError::Validation("invalid conflict field_path".into()));
+    }
+
+    let value = match chosen_value {
+        Value::String(inner) => inner.clone(),
+        _ => chosen_value.to_string(),
+    };
+
+    let sql = format!("UPDATE \"{table}\" SET \"{column}\" = ? WHERE id = ?");
+    sqlx::query(&sql)
+        .bind(value)
+        .bind(&row.entity_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
 }
 
 impl Default for ConflictResolver {
@@ -199,6 +279,7 @@ fn build_conflict_record(local: &CrdtOp, remote: &CrdtOp) -> SyncResult<Conflict
     let remote_value = materialize_payload(remote).unwrap_or(Value::Null);
 
     Ok(ConflictRecord {
+        conflict_id: String::new(),
         entity_id: local.entity_id().to_owned(),
         entity_type: String::new(),
         local_value: serde_json::to_vec(&local_value)?,

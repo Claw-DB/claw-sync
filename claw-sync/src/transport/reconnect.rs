@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
 };
 
+use rand::Rng;
 use tokio::{
     sync::{broadcast, RwLock},
     time::{self, Duration},
@@ -119,9 +120,19 @@ impl ReconnectingClient {
     }
 }
 
+/// Computes transport retry delay as `base_ms * 2^attempt + rand(0..base_ms)`, capped at 30s.
+pub fn transport_retry(base_ms: u64, attempt: u32) -> Duration {
+    let base = base_ms.max(1);
+    let exp = base.saturating_mul(2_u64.saturating_pow(attempt.min(20)));
+    let jitter = rand::thread_rng().gen_range(0..base);
+    Duration::from_millis((exp.saturating_add(jitter)).min(30_000))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{path::Path, sync::Arc};
+
+    use tokio::time::Duration;
 
     use super::{ReconnectingClient, SyncEvent};
     use crate::{config::SyncConfig, crypto::keys::KeyStore};
@@ -156,5 +167,15 @@ mod tests {
 
         let event = receiver.try_recv().expect("event should be available");
         assert_eq!(event, SyncEvent::PullRequired);
+    }
+
+    #[test]
+    fn transport_retry_is_capped_and_monotonic_enough() {
+        let first = super::transport_retry(100, 0);
+        let later = super::transport_retry(100, 5);
+        let capped = super::transport_retry(100, 30);
+
+        assert!(later >= first);
+        assert!(capped <= Duration::from_secs(30));
     }
 }

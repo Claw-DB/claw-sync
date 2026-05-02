@@ -159,10 +159,23 @@ impl DeltaApplier {
                 }
                 Some(ResolvedOp::Escalate(record)) => {
                     let mut record = record;
+                    let conflict_id = uuid::Uuid::new_v4().to_string();
                     record.entity_type = delta.entity_type.to_string();
+                    record.conflict_id = conflict_id.clone();
+                    persist_conflict_record(
+                        &mut transaction,
+                        &conflict_id,
+                        self.workspace_id,
+                        delta.entity_type,
+                        op.entity_id(),
+                        &record,
+                    )
+                    .await?;
+                    reset_runtime_context(&mut transaction).await?;
+                    transaction.commit().await?;
                     return Err(SyncError::ConflictEscalation {
                         entity_id: record.entity_id.clone(),
-                        record,
+                        record: Box::new(record),
                     });
                 }
             };
@@ -573,9 +586,61 @@ async fn ensure_sync_metadata_tables(pool: &SqlitePool) -> SyncResult<()> {
             device_id TEXT NOT NULL,
             PRIMARY KEY (entity_type, entity_id, field)
         )",
+        "CREATE TABLE IF NOT EXISTS conflicts (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            field_path TEXT NOT NULL,
+            local_value TEXT NOT NULL,
+            remote_value TEXT NOT NULL,
+            local_hlc TEXT NOT NULL,
+            remote_hlc TEXT NOT NULL,
+            detected_at INTEGER NOT NULL,
+            resolved INTEGER NOT NULL DEFAULT 0,
+            resolution TEXT,
+            resolved_at INTEGER
+        )",
     ] {
         sqlx::query(statement).execute(pool).await?;
     }
+    Ok(())
+}
+
+async fn persist_conflict_record(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    conflict_id: &str,
+    workspace_id: Uuid,
+    entity_type: EntityType,
+    entity_id: &str,
+    record: &crate::proto::clawsync::v1::ConflictRecord,
+) -> SyncResult<()> {
+    let local_value = String::from_utf8(record.local_value.clone()).map_err(|error| {
+        SyncError::Validation(format!("invalid local conflict payload encoding: {error}"))
+    })?;
+    let remote_value = String::from_utf8(record.remote_value.clone()).map_err(|error| {
+        SyncError::Validation(format!("invalid remote conflict payload encoding: {error}"))
+    })?;
+
+    sqlx::query(
+        "INSERT INTO conflicts (
+            id, workspace_id, entity_type, entity_id, field_path,
+            local_value, remote_value, local_hlc, remote_hlc, detected_at, resolved, resolution
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)",
+    )
+    .bind(conflict_id)
+    .bind(workspace_id.to_string())
+    .bind(entity_type.to_string())
+    .bind(entity_id)
+    .bind("$")
+    .bind(local_value)
+    .bind(remote_value)
+    .bind(&record.local_hlc)
+    .bind(&record.remote_hlc)
+    .bind(chrono::Utc::now().timestamp_millis())
+    .execute(&mut **transaction)
+    .await?;
+
     Ok(())
 }
 

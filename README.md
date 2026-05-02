@@ -2,6 +2,8 @@
 
 `claw-sync` is the replication and recovery layer for ClawDB: it observes local `claw-core` mutations, converts them into encrypted CRDT deltas, transports them to a sync hub, applies remote deltas back into local state, and preserves resumable checkpoints plus a signed audit chain so synchronization can recover cleanly after transport failure, process restart, or conflict escalation.
 
+This repository does not vendor `claw-core`; use the published crate from crates.io (`claw-core = "0.1.0"`).
+
 ## Architecture
 
 ```text

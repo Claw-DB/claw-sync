@@ -45,7 +45,7 @@ pub enum SyncError {
         /// The entity whose conflict could not be resolved automatically.
         entity_id: String,
         /// Full conflict details for subscribers and manual resolution.
-        record: ConflictRecord,
+        record: Box<ConflictRecord>,
     },
 }
 

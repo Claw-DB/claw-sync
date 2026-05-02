@@ -1,6 +1,6 @@
 //! client.rs — tonic gRPC client for communicating with the claw-sync hub.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures::Stream;
@@ -14,15 +14,73 @@ use uuid::Uuid;
 
 use crate::{
     config::SyncConfig,
-    crypto::{keys::KeyStore, signing::sign},
+    crypto::{
+        cipher::{decrypt_chunk, EncryptedBlob},
+        keys::KeyStore,
+        signing::sign,
+    },
+    delta::{hasher::content_hash, unpacker::chunks_from_proto},
     error::{SyncError, SyncResult},
     identity::DeviceIdentity,
     proto::clawsync::v1::{
-        sync_service_client::SyncServiceClient, DeviceInfo, HeartbeatRequest, PullRequest,
-        PullResponse, PushRequest, PushResponse, ReconcileRequest, ReconcileResponse,
+        sync_service_client::SyncServiceClient, DeltaChunk, DeviceInfo, HeartbeatRequest,
+        PullRequest, PullResponse, PushRequest, PushResponse, ReconcileRequest, ReconcileResponse,
         RegisterDeviceRequest, SyncCursor,
     },
+    queue::scheduler::RetryScheduler,
 };
+
+/// Public alias used by callers that interact with a hub endpoint.
+pub type SyncHubClient = SyncClient;
+
+/// Public alias for transport chunk payloads.
+pub type SyncChunk = DeltaChunk;
+
+/// Transport error classification for retry decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportFailureKind {
+    /// Retry may succeed because failure is likely temporary.
+    Transient,
+    /// Retry is not expected to succeed without intervention.
+    Permanent,
+}
+
+/// Per-chunk push acknowledgement outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushChunkResult {
+    /// Stable payload id of the chunk.
+    pub chunk_id: String,
+    /// Sequence number inside the payload.
+    pub seq: i32,
+    /// Whether the chunk was accepted by the hub.
+    pub accepted: bool,
+    /// Error kind for rejected chunks.
+    pub failure_kind: Option<TransportFailureKind>,
+    /// Optional structured failure reason.
+    pub reason: Option<String>,
+}
+
+/// Aggregate push result over a sequence of chunks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PushResult {
+    /// Ordered per-chunk outcomes.
+    pub per_chunk: Vec<PushChunkResult>,
+    /// Number of accepted chunks.
+    pub accepted: u32,
+    /// Number of transient failures.
+    pub transient_failures: u32,
+    /// Number of permanent failures.
+    pub permanent_failures: u32,
+}
+
+/// Pull result for heartbeat probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeartbeatResult {
+    /// Hub wall-clock time in unix milliseconds.
+    pub server_time: i64,
+    /// Whether the hub indicates a pull is required.
+    pub pull_required: bool,
+}
 
 /// gRPC interceptor that injects bearer auth on every outbound request.
 #[derive(Clone)]
@@ -55,6 +113,7 @@ impl Interceptor for AuthInterceptor {
 pub struct SyncClient {
     inner: SyncServiceClient<InterceptedService<Channel, AuthInterceptor>>,
     config: Arc<SyncConfig>,
+    key_store: Arc<KeyStore>,
 }
 
 impl SyncClient {
@@ -83,7 +142,11 @@ impl SyncClient {
         let interceptor = AuthInterceptor::new(config.device_id, signed_token)?;
         let inner = SyncServiceClient::with_interceptor(channel, interceptor);
 
-        Ok(Self { inner, config })
+        Ok(Self {
+            inner,
+            config,
+            key_store,
+        })
     }
 
     /// Registers the local device with the hub.
@@ -163,6 +226,18 @@ impl SyncClient {
 
     /// Sends a heartbeat request and returns whether the hub requires a pull pass.
     pub async fn heartbeat(&mut self, device_id: Uuid, workspace_id: Uuid) -> SyncResult<bool> {
+        Ok(self
+            .heartbeat_result(device_id, workspace_id)
+            .await?
+            .pull_required)
+    }
+
+    /// Sends liveness information to the hub and returns detailed heartbeat data.
+    pub async fn heartbeat_result(
+        &mut self,
+        device_id: Uuid,
+        workspace_id: Uuid,
+    ) -> SyncResult<HeartbeatResult> {
         let response = self
             .inner
             .heartbeat(HeartbeatRequest {
@@ -172,7 +247,209 @@ impl SyncClient {
             })
             .await
             .map_err(|error| SyncError::Transport(format!("heartbeat failed: {error}")))?;
-        Ok(response.into_inner().sync_required)
+        let inner = response.into_inner();
+        Ok(HeartbeatResult {
+            server_time: inner.server_time,
+            pull_required: inner.sync_required,
+        })
+    }
+
+    /// Pushes chunks with retry-aware transient/permanent classification.
+    pub async fn push_deltas(&mut self, chunks: Vec<SyncChunk>) -> SyncResult<PushResult> {
+        let mut result = PushResult::default();
+        if chunks.is_empty() {
+            return Ok(result);
+        }
+
+        let mut pending = VecDeque::from(chunks);
+        while let Some(chunk) = pending.pop_front() {
+            let mut attempt = 0_u32;
+            let mut chunk_result = PushChunkResult {
+                chunk_id: chunk.chunk_id.clone(),
+                seq: chunk.seq,
+                accepted: false,
+                failure_kind: None,
+                reason: None,
+            };
+
+            loop {
+                let request = PushRequest {
+                    cursor: Some(SyncCursor {
+                        workspace_id: self.config.workspace_id.to_string(),
+                        device_id: self.config.device_id.to_string(),
+                        lamport_clock: 0,
+                        hlc_timestamp: String::new(),
+                        state_hash: Vec::new(),
+                    }),
+                    chunks: vec![chunk.clone()],
+                };
+
+                let push_stream = self.push_stream(futures::stream::iter(vec![request])).await;
+                let mut responses = match push_stream {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let kind = classify_error(&error);
+                        if kind == TransportFailureKind::Transient
+                            && attempt < self.config.max_retries
+                        {
+                            tokio::time::sleep(
+                                RetryScheduler::new(self.config.clone()).next_retry_delay(attempt),
+                            )
+                            .await;
+                            attempt = attempt.saturating_add(1);
+                            continue;
+                        }
+                        chunk_result.failure_kind = Some(kind);
+                        chunk_result.reason = Some(error.to_string());
+                        break;
+                    }
+                };
+
+                match responses.message().await {
+                    Ok(Some(ack)) => {
+                        let accepted = ack.accepted
+                            && (ack.rejected_chunk_ids.is_empty()
+                                || !ack.rejected_chunk_ids.contains(&chunk.chunk_id));
+                        if accepted {
+                            chunk_result.accepted = true;
+                            result.accepted = result.accepted.saturating_add(1);
+                        } else {
+                            chunk_result.failure_kind = Some(TransportFailureKind::Permanent);
+                            chunk_result.reason = Some(if ack.reason.is_empty() {
+                                "hub rejected pushed chunk".to_owned()
+                            } else {
+                                ack.reason
+                            });
+                        }
+                        break;
+                    }
+                    Ok(None) => {
+                        chunk_result.failure_kind = Some(TransportFailureKind::Transient);
+                        chunk_result.reason =
+                            Some("push stream ended before chunk acknowledgement".to_owned());
+                        if attempt < self.config.max_retries {
+                            tokio::time::sleep(
+                                RetryScheduler::new(self.config.clone()).next_retry_delay(attempt),
+                            )
+                            .await;
+                            attempt = attempt.saturating_add(1);
+                            continue;
+                        }
+                        break;
+                    }
+                    Err(status) => {
+                        let kind = classify_status(&status);
+                        if kind == TransportFailureKind::Transient
+                            && attempt < self.config.max_retries
+                        {
+                            tokio::time::sleep(
+                                RetryScheduler::new(self.config.clone()).next_retry_delay(attempt),
+                            )
+                            .await;
+                            attempt = attempt.saturating_add(1);
+                            continue;
+                        }
+                        chunk_result.failure_kind = Some(kind);
+                        chunk_result.reason = Some(status.message().to_owned());
+                        break;
+                    }
+                }
+            }
+
+            match chunk_result.failure_kind {
+                Some(TransportFailureKind::Transient) => {
+                    result.transient_failures = result.transient_failures.saturating_add(1)
+                }
+                Some(TransportFailureKind::Permanent) => {
+                    result.permanent_failures = result.permanent_failures.saturating_add(1)
+                }
+                None => {}
+            }
+            result.per_chunk.push(chunk_result);
+        }
+
+        Ok(result)
+    }
+
+    /// Pulls chunks since `since_seq`, verifying per-chunk hash and decryption.
+    pub async fn pull_deltas(
+        &mut self,
+        since_seq: u64,
+        max_chunks: u32,
+    ) -> SyncResult<Vec<SyncChunk>> {
+        let mut stream = self
+            .pull(
+                SyncCursor {
+                    workspace_id: self.config.workspace_id.to_string(),
+                    device_id: self.config.device_id.to_string(),
+                    lamport_clock: since_seq as i64,
+                    hlc_timestamp: String::new(),
+                    state_hash: Vec::new(),
+                },
+                crate::delta::extractor::EntityType::all().to_vec(),
+            )
+            .await?;
+
+        let mut chunks = Vec::new();
+        while let Some(response) = stream
+            .message()
+            .await
+            .map_err(|error| SyncError::Transport(format!("pull stream failed: {error}")))?
+        {
+            chunks.extend(response.chunks);
+            if chunks.len() as u32 >= max_chunks {
+                break;
+            }
+        }
+        chunks.truncate(max_chunks as usize);
+
+        for chunk in &chunks {
+            let payload_hash: [u8; 32] =
+                chunk.payload_hash.as_slice().try_into().map_err(|_| {
+                    SyncError::Validation("chunk payload hash must be 32 bytes".into())
+                })?;
+            let computed = content_hash(&chunk.encrypted_payload);
+            if payload_hash != computed {
+                return Err(SyncError::Validation(format!(
+                    "payload hash verification failed for chunk {}:{}",
+                    chunk.chunk_id, chunk.seq
+                )));
+            }
+
+            let blob = EncryptedBlob::from_bytes(&chunk.encrypted_payload)?;
+            let _ = decrypt_chunk(&blob, self.key_store.workspace_key(), &chunk.chunk_id)?;
+        }
+
+        if !chunks.is_empty() {
+            let _ = chunks_from_proto(chunks.clone())?;
+        }
+        Ok(chunks)
+    }
+}
+
+fn classify_error(error: &SyncError) -> TransportFailureKind {
+    match error {
+        SyncError::Transport(message)
+            if message.contains("unavailable")
+                || message.contains("deadline")
+                || message.contains("timeout")
+                || message.contains("resource exhausted") =>
+        {
+            TransportFailureKind::Transient
+        }
+        SyncError::Transport(_) => TransportFailureKind::Permanent,
+        _ => TransportFailureKind::Permanent,
+    }
+}
+
+fn classify_status(status: &Status) -> TransportFailureKind {
+    use tonic::Code;
+
+    match status.code() {
+        Code::Unavailable | Code::DeadlineExceeded | Code::ResourceExhausted | Code::Aborted => {
+            TransportFailureKind::Transient
+        }
+        _ => TransportFailureKind::Permanent,
     }
 }
 

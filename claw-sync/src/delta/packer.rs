@@ -75,7 +75,7 @@ pub fn pack(
     let encrypted = encrypt_chunk(&compressed, workspace_key, &chunk_id)?;
     let encrypted_bytes = encrypted.to_bytes();
 
-    let total_chunks = ((encrypted_bytes.len() + max_chunk_bytes - 1) / max_chunk_bytes) as u32;
+    let total_chunks = encrypted_bytes.len().div_ceil(max_chunk_bytes) as u32;
     let mut chunks = Vec::with_capacity(total_chunks as usize);
     let mut chunk_hashes = Vec::with_capacity(total_chunks as usize);
 

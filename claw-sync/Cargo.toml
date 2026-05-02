@@ -14,6 +14,7 @@ name = "claw_sync"
 path = "src/lib.rs"
 
 [dependencies]
+claw-core = "0.1.0"
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.12", features = ["transport", "tls-roots"] }
 prost = "0.13"
@@ -24,7 +25,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
 sodiumoxide = "0.2"
 blake3 = "1.5"
 base64 = "0.22"

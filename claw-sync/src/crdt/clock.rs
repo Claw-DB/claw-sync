@@ -114,6 +114,7 @@ pub struct HlcTimestamp {
 
 impl HlcTimestamp {
     /// Serialises the timestamp to `{logical_ms:016x}-{counter:08x}-{node_id}`.
+    #[allow(clippy::inherent_to_string_shadow_display)]
     pub fn to_string(&self) -> String {
         format!(
             "{:016x}-{:08x}-{}",
@@ -122,6 +123,7 @@ impl HlcTimestamp {
     }
 
     /// Parses a timestamp emitted by [`HlcTimestamp::to_string`].
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> SyncResult<Self> {
         <Self as FromStr>::from_str(value)
     }

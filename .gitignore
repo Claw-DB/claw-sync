@@ -1,2 +1,8 @@
 /target/
 Cargo.lock
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.lock
+!Cargo.lock

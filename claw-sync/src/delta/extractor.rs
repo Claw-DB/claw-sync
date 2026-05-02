@@ -538,9 +538,7 @@ fn trigger_name(table_name: &str, suffix: &str) -> String {
 }
 
 fn trigger_hlc_sql() -> String {
-    format!(
-        "printf('%016x-%08x-%s', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0, (SELECT current_device_id FROM sync_runtime_context WHERE id = 1))"
-    )
+    "printf('%016x-%08x-%s', CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER), 0, (SELECT current_device_id FROM sync_runtime_context WHERE id = 1))".to_string()
 }
 
 #[cfg(test)]

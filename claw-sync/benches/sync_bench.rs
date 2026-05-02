@@ -15,7 +15,7 @@ use claw_sync::{
     delta::{
         extractor::{DeltaExtractor, DeltaSet, EntityType},
         hasher::content_hash,
-        packer::pack,
+        packer::{pack, payload_to_proto_chunks},
         unpacker::unpack,
     },
     queue::offline::{OfflineQueue, QueueStatus, QueuedOp},
@@ -367,6 +367,26 @@ fn bench_applier_100_inserts(c: &mut Criterion) {
     });
 }
 
+fn bench_push_throughput_10k_delta_rows(c: &mut Criterion) {
+    let workspace_key = KeyStore::load_or_create(
+        Path::new("/tmp/claw-sync-bench-push-10k"),
+        b"bench-push-10k",
+    )
+    .expect("keystore should load")
+    .workspace_key()
+    .clone();
+    let delta = delta_set_with_ops(10_000);
+
+    c.bench_function("bench_push_throughput_10k_delta_rows", |b| {
+        b.iter(|| {
+            let payload = pack(&delta, &workspace_key, 64 * 1024).expect("pack should succeed");
+            let proto_chunks = payload_to_proto_chunks(&payload);
+            assert!(!proto_chunks.is_empty());
+            proto_chunks.len()
+        })
+    });
+}
+
 criterion_group!(
     sync_benches,
     bench_pack_delta_100_ops,
@@ -381,5 +401,6 @@ criterion_group!(
     bench_lww_merge_1000,
     bench_extractor_1000_rows,
     bench_applier_100_inserts,
+    bench_push_throughput_10k_delta_rows,
 );
 criterion_main!(sync_benches);

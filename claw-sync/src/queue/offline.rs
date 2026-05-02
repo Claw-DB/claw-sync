@@ -16,6 +16,8 @@ use crate::{
     crdt::ops::OpKind,
     delta::extractor::EntityType,
     error::{SyncError, SyncResult},
+    queue::drain::DrainResult,
+    transport::client::{SyncChunk, SyncHubClient, TransportFailureKind},
 };
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -352,6 +354,117 @@ impl OfflineQueue {
         .await?;
         Ok(result.rows_affected())
     }
+
+    /// Enqueues a transport chunk into the lightweight offline chunk queue.
+    pub async fn enqueue_chunk(&self, chunk: &SyncChunk) -> SyncResult<()> {
+        let chunk_bytes = serde_json::to_vec(chunk)?;
+        sqlx::query(
+            "INSERT INTO offline_queue (chunk_bytes, enqueued_at, attempts, last_attempt, status)
+             VALUES (?, ?, 0, NULL, 'pending')",
+        )
+        .bind(chunk_bytes)
+        .bind(Utc::now().timestamp_millis())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Drains up to `max_batch` pending chunk rows and pushes them to the hub.
+    pub async fn drain_chunks(
+        &self,
+        client: &mut SyncHubClient,
+        max_batch: usize,
+        max_retries: u32,
+    ) -> SyncResult<DrainResult> {
+        if max_batch == 0 {
+            return Ok(DrainResult::default());
+        }
+
+        let rows = sqlx::query_as::<_, OfflineChunkRow>(
+            "SELECT id, chunk_bytes, attempts
+             FROM offline_queue
+             WHERE status = 'pending'
+             ORDER BY enqueued_at ASC
+             LIMIT ?",
+        )
+        .bind(max_batch as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if rows.is_empty() {
+            return Ok(DrainResult {
+                remaining_pending: self.pending_chunk_count().await?,
+                ..DrainResult::default()
+            });
+        }
+
+        let mut chunks = Vec::with_capacity(rows.len());
+        for row in &rows {
+            chunks.push(serde_json::from_slice::<SyncChunk>(&row.chunk_bytes)?);
+        }
+
+        let push_result = client.push_deltas(chunks).await?;
+        let mut result = DrainResult::default();
+
+        for (index, row) in rows.iter().enumerate() {
+            let outcome = push_result.per_chunk.get(index);
+            match outcome.map(|current| current.accepted).unwrap_or(false) {
+                true => {
+                    sqlx::query("DELETE FROM offline_queue WHERE id = ?")
+                        .bind(row.id)
+                        .execute(&self.pool)
+                        .await?;
+                    result.delivered = result.delivered.saturating_add(1);
+                }
+                false => {
+                    let failure_kind = outcome
+                        .and_then(|current| current.failure_kind)
+                        .unwrap_or(TransportFailureKind::Transient);
+                    let next_attempts = row.attempts.saturating_add(1);
+                    let failed = next_attempts >= max_retries as i64
+                        || failure_kind == TransportFailureKind::Permanent;
+                    sqlx::query(
+                        "UPDATE offline_queue
+                         SET attempts = ?,
+                             last_attempt = ?,
+                             status = CASE WHEN ? THEN 'failed' ELSE 'pending' END
+                         WHERE id = ?",
+                    )
+                    .bind(next_attempts)
+                    .bind(Utc::now().timestamp_millis())
+                    .bind(failed)
+                    .bind(row.id)
+                    .execute(&self.pool)
+                    .await?;
+
+                    if failed {
+                        result.failed = result.failed.saturating_add(1);
+                    } else {
+                        result.retried = result.retried.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        result.remaining_pending = self.pending_chunk_count().await?;
+        Ok(result)
+    }
+
+    /// Returns the number of pending chunk rows in `offline_queue`.
+    pub async fn pending_chunk_count(&self) -> SyncResult<u64> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM offline_queue WHERE status = 'pending'")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count.max(0) as u64)
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct OfflineChunkRow {
+    id: i64,
+    chunk_bytes: Vec<u8>,
+    attempts: i64,
 }
 
 async fn fetch_rows_by_ids(
