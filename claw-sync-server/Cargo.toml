@@ -1,6 +1,6 @@
 [package]
 name = "claw-sync-server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "Standalone sync hub binary for claw-sync"
@@ -8,6 +8,10 @@ authors = ["Tomiwa Adeyemi <adeyemitomiwa7@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/claw-db/claw-sync/claw-sync-server"
 homepage = "https://github.com/claw-db/claw-sync/claw-sync-server"
+readme = "../README.md"
+keywords = ["clawdb", "claw", "sync", "database", "server"]
+categories = ["database", "network-programming"]
+
 
 
 [[bin]]
@@ -26,6 +30,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 base64 = "0.22"
-claw-sync = { version = "0.1.0", path = "../claw-sync" }
+claw-sync = { version = "0.1.1", path = "../claw-sync" }

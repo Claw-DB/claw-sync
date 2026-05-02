@@ -1,6 +1,6 @@
 [package]
 name = "claw-sync"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "Local-to-cloud synchronisation engine for ClawDB"
@@ -8,6 +8,7 @@ license = "MIT"
 authors = ["Tomasz Kowal <tomasz.kowal@clawdb.com>"]
 homepage = "https://github.com/clawdb/claw-sync"
 repository = "https://github.com/clawdb/claw-sync"
+readme = "../README.md"
 keywords = ["clawdb", "claw", "sync", "database", "storage"]
 categories = ["database", "network-programming"]
 
@@ -20,7 +21,7 @@ name = "claw_sync"
 path = "src/lib.rs"
 
 [dependencies]
-claw-core = "0.1.0"
+claw-core = "0.1.1"
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.12", features = ["transport", "tls-roots"] }
 prost = "0.13"
@@ -31,9 +32,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
 sodiumoxide = "0.2"
-blake3 = "1.5"
+blake3 = "1.8"
 base64 = "0.22"
 lz4_flex = "0.11"
 async-trait = "0.1"
