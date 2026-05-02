@@ -9,7 +9,7 @@ authors = ["Tomasz Kowal <tomasz.kowal@clawdb.com>"]
 homepage = "https://github.com/clawdb/claw-sync"
 repository = "https://github.com/clawdb/claw-sync"
 keywords = ["clawdb", "claw", "sync", "database", "storage"]
-categories = ["database", "synchronization", "network-programming"]
+categories = ["database", "network-programming"]
 
 [[bin]]
 name = "claw-sync"

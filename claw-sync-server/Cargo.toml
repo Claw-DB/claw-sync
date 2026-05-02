@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Standalone sync hub binary for claw-sync"
+authors = ["Tomiwa Adeyemi <adeyemitomiwa7@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/claw-db/claw-sync/claw-sync-server"
+homepage = "https://github.com/claw-db/claw-sync/claw-sync-server"
+
 
 [[bin]]
 name = "claw-sync-server"
