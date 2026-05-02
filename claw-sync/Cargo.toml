@@ -45,7 +45,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
 dashmap = "6"
 arc-swap = "1"
-rand = "0.8"
+rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 
 [build-dependencies]
