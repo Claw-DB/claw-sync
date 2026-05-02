@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Local-to-cloud synchronisation engine for ClawDB"
+license = "MIT"
+authors = ["Tomasz Kowal <tomasz.kowal@clawdb.com>"]
+homepage = "https://github.com/clawdb/claw-sync"
+repository = "https://github.com/clawdb/claw-sync"
+keywords = ["clawdb", "claw", "sync", "database", "storage"]
+categories = ["database", "synchronization", "network-programming"]
 
 [[bin]]
 name = "claw-sync"
