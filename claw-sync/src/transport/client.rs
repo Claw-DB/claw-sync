@@ -4,6 +4,8 @@ use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures::Stream;
+use tokio::{sync::mpsc, time::timeout};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     metadata::AsciiMetadataValue,
     service::{interceptor::InterceptedService, Interceptor},
@@ -27,7 +29,7 @@ use crate::{
         PullRequest, PullResponse, PushRequest, PushResponse, ReconcileRequest, ReconcileResponse,
         RegisterDeviceRequest, SyncCursor,
     },
-    queue::scheduler::RetryScheduler,
+    transport::reconnect::transport_retry,
 };
 
 /// Public alias used by callers that interact with a hub endpoint.
@@ -149,6 +151,16 @@ impl SyncClient {
         })
     }
 
+    /// Returns the configured retry limit for transport operations.
+    pub fn max_retries(&self) -> u32 {
+        self.config.max_retries
+    }
+
+    /// Returns the configured retry base in milliseconds.
+    pub fn retry_base_ms(&self) -> u64 {
+        self.config.retry_base_ms
+    }
+
     /// Registers the local device with the hub.
     pub async fn register_device(&mut self, identity: &DeviceIdentity) -> SyncResult<()> {
         let challenge = format!("{}:{}", identity.device_id, self.config.workspace_id);
@@ -225,15 +237,7 @@ impl SyncClient {
     }
 
     /// Sends a heartbeat request and returns whether the hub requires a pull pass.
-    pub async fn heartbeat(&mut self, device_id: Uuid, workspace_id: Uuid) -> SyncResult<bool> {
-        Ok(self
-            .heartbeat_result(device_id, workspace_id)
-            .await?
-            .pull_required)
-    }
-
-    /// Sends liveness information to the hub and returns detailed heartbeat data.
-    pub async fn heartbeat_result(
+    pub async fn heartbeat(
         &mut self,
         device_id: Uuid,
         workspace_id: Uuid,
@@ -284,7 +288,8 @@ impl SyncClient {
                     chunks: vec![chunk.clone()],
                 };
 
-                let push_stream = self.push_stream(futures::stream::iter(vec![request])).await;
+                let (tx, rx) = mpsc::channel(1);
+                let push_stream = self.push_stream(ReceiverStream::new(rx)).await;
                 let mut responses = match push_stream {
                     Ok(stream) => stream,
                     Err(error) => {
@@ -292,10 +297,8 @@ impl SyncClient {
                         if kind == TransportFailureKind::Transient
                             && attempt < self.config.max_retries
                         {
-                            tokio::time::sleep(
-                                RetryScheduler::new(self.config.clone()).next_retry_delay(attempt),
-                            )
-                            .await;
+                            tokio::time::sleep(transport_retry(self.config.retry_base_ms, attempt))
+                                .await;
                             attempt = attempt.saturating_add(1);
                             continue;
                         }
@@ -304,6 +307,23 @@ impl SyncClient {
                         break;
                     }
                 };
+
+                if timeout(Duration::from_secs(5), tx.send(request))
+                    .await
+                    .is_err()
+                {
+                    chunk_result.failure_kind = Some(TransportFailureKind::Transient);
+                    chunk_result.reason =
+                        Some("timed out while enqueueing push request".to_owned());
+                    if attempt < self.config.max_retries {
+                        tokio::time::sleep(transport_retry(self.config.retry_base_ms, attempt))
+                            .await;
+                        attempt = attempt.saturating_add(1);
+                        continue;
+                    }
+                    break;
+                }
+                drop(tx);
 
                 match responses.message().await {
                     Ok(Some(ack)) => {
@@ -328,10 +348,8 @@ impl SyncClient {
                         chunk_result.reason =
                             Some("push stream ended before chunk acknowledgement".to_owned());
                         if attempt < self.config.max_retries {
-                            tokio::time::sleep(
-                                RetryScheduler::new(self.config.clone()).next_retry_delay(attempt),
-                            )
-                            .await;
+                            tokio::time::sleep(transport_retry(self.config.retry_base_ms, attempt))
+                                .await;
                             attempt = attempt.saturating_add(1);
                             continue;
                         }
@@ -342,10 +360,8 @@ impl SyncClient {
                         if kind == TransportFailureKind::Transient
                             && attempt < self.config.max_retries
                         {
-                            tokio::time::sleep(
-                                RetryScheduler::new(self.config.clone()).next_retry_delay(attempt),
-                            )
-                            .await;
+                            tokio::time::sleep(transport_retry(self.config.retry_base_ms, attempt))
+                                .await;
                             attempt = attempt.saturating_add(1);
                             continue;
                         }
@@ -410,7 +426,7 @@ impl SyncClient {
                 })?;
             let computed = content_hash(&chunk.encrypted_payload);
             if payload_hash != computed {
-                return Err(SyncError::Validation(format!(
+                return Err(SyncError::IntegrityError(format!(
                     "payload hash verification failed for chunk {}:{}",
                     chunk.chunk_id, chunk.seq
                 )));

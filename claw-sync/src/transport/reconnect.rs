@@ -95,11 +95,11 @@ impl ReconnectingClient {
                     match self.get_or_connect().await {
                         Ok(mut client) => {
                             match client.heartbeat(self.config.device_id, self.config.workspace_id).await {
-                                Ok(sync_required) => {
+                                Ok(heartbeat) => {
                                     if !self.connected.swap(true, Ordering::SeqCst) {
                                         let _ = self.events.send(SyncEvent::Connected);
                                     }
-                                    if sync_required {
+                                    if heartbeat.pull_required {
                                         let _ = self.events.send(SyncEvent::PullRequired);
                                     }
                                 }

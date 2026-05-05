@@ -23,6 +23,10 @@ pub enum SyncError {
     #[error("crypto error: {0}")]
     Crypto(String),
 
+    /// A payload or audit-integrity verification failure.
+    #[error("integrity error: {0}")]
+    IntegrityError(String),
+
     /// A database operation failed.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
