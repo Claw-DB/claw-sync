@@ -1,4 +1,5 @@
 use std::{
+    fs,
     net::SocketAddr,
     path::Path,
     sync::{
@@ -26,6 +27,7 @@ use claw_sync::{
         PushResponse, ReconcileRequest, ReconcileResponse, RegisterDeviceRequest,
         RegisterDeviceResponse, ResolveConflictRequest, ResolveConflictResponse, SyncCursor,
     },
+    transport::reconnect::transport_retry,
 };
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
@@ -38,32 +40,32 @@ use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Code, Request, Response, Status, Streaming};
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum PushBehavior {
+    #[default]
     AlwaysOk,
-    FailTimes { remaining: u32, code: Code },
-    AlwaysFail { code: Code },
-}
-
-impl Default for PushBehavior {
-    fn default() -> Self {
-        Self::AlwaysOk
-    }
+    FailTimes {
+        remaining: u32,
+        code: Code,
+    },
+    AlwaysFail {
+        code: Code,
+    },
 }
 
 impl PushBehavior {
-    fn on_call(&mut self) -> Result<(), Status> {
+    fn on_call(&mut self) -> Result<(), Code> {
         match self {
             Self::AlwaysOk => Ok(()),
             Self::FailTimes { remaining, code } => {
                 if *remaining > 0 {
                     *remaining -= 1;
-                    Err(Status::new(*code, "mock push failure"))
+                    Err(*code)
                 } else {
                     Ok(())
                 }
             }
-            Self::AlwaysFail { code } => Err(Status::new(*code, "mock push failure")),
+            Self::AlwaysFail { code } => Err(*code),
         }
     }
 }
@@ -113,7 +115,8 @@ impl SyncService for MockSyncService {
             .push_behavior
             .lock()
             .expect("push behavior lock should succeed")
-            .on_call()?;
+            .on_call()
+            .map_err(|code| Status::new(code, "mock push failure"))?;
 
         let mut stream = request.into_inner();
         let mut requests = Vec::new();
@@ -861,7 +864,7 @@ async fn conflict_detection_persists_row() {
         .await
         .expect_err("pull should escalate conflict");
 
-    let conflicts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conflicts")
+    let conflicts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_conflicts")
         .fetch_one(&harness.pool)
         .await
         .expect("conflict count should query");
@@ -886,6 +889,41 @@ async fn audit_chain_after_20_pushes_verifies() {
     assert!(result.ok);
 
     engine.close().await.expect("close should succeed");
+}
+
+#[test]
+fn exponential_backoff_grows_within_expected_bounds() {
+    let first = transport_retry(100, 0);
+    let second = transport_retry(100, 1);
+    let third = transport_retry(100, 2);
+
+    assert!(first >= Duration::from_millis(100));
+    assert!(first < Duration::from_millis(200));
+    assert!(second >= Duration::from_millis(200));
+    assert!(second < Duration::from_millis(300));
+    assert!(third >= Duration::from_millis(400));
+    assert!(third < Duration::from_millis(500));
+}
+
+#[test]
+fn workspace_uses_crates_io_claw_core_dependency() {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = crate_root.parent().expect("workspace root should exist");
+
+    assert!(
+        !workspace_root.join("claw-core").exists(),
+        "workspace should not vendor claw-core"
+    );
+
+    let manifest = fs::read_to_string(crate_root.join("Cargo.toml"))
+        .expect("crate manifest should be readable");
+    assert!(manifest.contains("claw-core"));
+    assert!(manifest.contains("0.1.2"));
+
+    let lock =
+        fs::read_to_string(workspace_root.join("Cargo.lock")).expect("lockfile should be readable");
+    assert!(lock.contains("name = \"claw-core\""));
+    assert!(lock.contains("source = \"registry+https://github.com/rust-lang/crates.io-index\""));
 }
 
 #[test]
