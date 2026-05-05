@@ -332,9 +332,9 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "claw-core"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "610a0aaa12ab29fb59a255c1b890d513b81d6d7c3059a33c6e885e2a2b8be58d"
+checksum = "71f988c2cdb7f3b61391bd3479d5d2d7b7c453882f28fbac6f330f7490aab818"
 dependencies = [
  "async-trait",
  "blake3",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "claw-sync"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "claw-sync-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64",
  "chrono",

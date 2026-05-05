@@ -4,3 +4,12 @@ members = [
     "claw-sync-server",
 ]
 resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"
+
+# For local claw-core development, uncomment the block below and point it at a
+# sibling checkout. Keep it disabled for published crates so crates.io resolves
+# the released dependency.
+# [patch.crates-io]
+# claw-core = { path = "../claw-core" }
