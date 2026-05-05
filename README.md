@@ -1,5 +1,7 @@
 # claw-sync
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-0A84FF.svg)](LICENSE)
+
 `claw-sync` is the replication and recovery layer for ClawDB. It observes local `claw-core` mutations, converts them into encrypted CRDT deltas, transports them to a sync hub, applies remote deltas back into local state, and preserves resumable checkpoints plus a signed audit chain so synchronization can recover cleanly after transport failure, process restart, or conflict escalation.
 
 This repository contains two Rust crates:
@@ -25,7 +27,8 @@ Add the library crate to an application that already uses `claw-core`:
 
 ```toml
 [dependencies]
-claw-sync = "0.1.1"
+claw-sync = "0.1.2"
+claw-core = "0.1.2"
 ```
 
 Install the client binary from crates.io:
@@ -37,7 +40,7 @@ cargo install claw-sync
 The server crate is published separately:
 
 ```sh
-cargo install claw-sync-server
+cargo install claw-sync-server --version 0.1.2
 ```
 
 ## Architecture
@@ -123,8 +126,8 @@ Required environment:
 | Variable | Purpose |
 | --- | --- |
 | `CLAW_SYNC_HUB_DATABASE_URL` | PostgreSQL connection string for hub metadata and delta storage. |
-| `CLAW_SYNC_TLS_CERT` | Path to the PEM certificate served by tonic. |
-| `CLAW_SYNC_TLS_KEY` | Path to the PEM private key served by tonic. |
+| `CLAW_SYNC_TLS_CERT` | Optional path to the PEM certificate served by tonic. |
+| `CLAW_SYNC_TLS_KEY` | Optional path to the PEM private key served by tonic. |
 
 Optional environment:
 
@@ -212,9 +215,11 @@ Install `protoc` before building because the gRPC bindings are generated during 
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-features -- -D warnings
+cargo build --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-features
-cargo bench --workspace --no-run
+cargo deny check
+cargo audit
 ```
 
-The GitHub CI workflow runs the same formatting, lint, test, and benchmark compile checks.
+The GitHub CI workflow runs the same formatting, build, lint, test, dependency-policy, and audit checks.

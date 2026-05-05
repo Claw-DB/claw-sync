@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-05-05
+
+### Packaging
+- Switched workspace and crate licensing to Apache-2.0 and added a NOTICE file.
+- Added crate-specific READMEs for `claw-sync` and `claw-sync-server`.
+- Documented an optional local `[patch.crates-io]` override for `claw-core` while keeping the published dependency in use.
+
+### Sync Hub
+- Changed hub persistence to store raw `DeltaChunk` bytes plus payload hashes for horizontal scalability.
+- Made server TLS optional at startup with a warning when certificate material is absent.
+- Updated `hub_devices` tracking so pulls advance `last_pull_cursor` durably.
+
+### Client And Queue
+- Added `SyncError::IntegrityError` for payload verification failures during pull.
+- Updated transport retry call sites to use the shared capped exponential backoff helper.
+- Aligned the `offline_queue` chunk schema with `last_attempt_at` and one-chunk-at-a-time drain semantics.
+
+### Tooling
+- Expanded CI to cover workspace build, tests, clippy, fmt, cargo-deny, and cargo-audit.
+- Added a publish workflow for both crates.
+
 ## 2026-05-01
 
 ### Workspace
