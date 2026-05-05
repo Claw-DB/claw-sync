@@ -1,17 +1,11 @@
-//! main.rs — PostgreSQL-backed sync hub server with TLS.
+//! main.rs — PostgreSQL-backed sync hub server with optional TLS.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use base64::Engine as _;
 use chrono::Utc;
 use claw_sync::{
-    crdt::{clock::HlcTimestamp, ops::CrdtOp},
     crypto::keys::KeyStore,
-    delta::{
-        extractor::{DeltaSet, EntityType},
-        packer::{pack, payload_to_proto_chunks},
-        unpacker::{chunks_from_proto, unpack},
-    },
     proto::clawsync::v1::{
         sync_service_server::{SyncService, SyncServiceServer},
         DeltaChunk, HeartbeatRequest, HeartbeatResponse, PullRequest, PullResponse, PushRequest,
@@ -19,6 +13,7 @@ use claw_sync::{
         RegisterDeviceResponse, ResolveConflictRequest, ResolveConflictResponse, SyncCursor,
     },
 };
+use prost::Message;
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -37,14 +32,9 @@ struct HubService {
 }
 
 #[derive(sqlx::FromRow)]
-struct HubRow {
+struct HubChunkRow {
     seq: i64,
-    entity_type: String,
-    entity_id: String,
-    op_kind: String,
-    op_payload: serde_json::Value,
-    hlc: String,
-    device_id: String,
+    chunk_bytes: Vec<u8>,
 }
 
 #[tokio::main]
@@ -64,18 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
-    let cert_path = std::env::var("CLAW_SYNC_TLS_CERT").map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "CLAW_SYNC_TLS_CERT is required",
-        )
-    })?;
-    let key_path = std::env::var("CLAW_SYNC_TLS_KEY").map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "CLAW_SYNC_TLS_KEY is required",
-        )
-    })?;
+    let tls_cert_path = std::env::var("CLAW_SYNC_TLS_CERT").ok();
+    let tls_key_path = std::env::var("CLAW_SYNC_TLS_KEY").ok();
 
     let pool = PgPoolOptions::new()
         .max_connections(20)
@@ -91,16 +71,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let key_store = Arc::new(KeyStore::load_or_create(&key_dir, key_seed.as_bytes())?);
 
-    let cert_pem = tokio::fs::read(cert_path).await?;
-    let key_pem = tokio::fs::read(key_path).await?;
-    let identity = Identity::from_pem(cert_pem, key_pem);
-
     let service = HubService { pool, key_store };
 
     tracing::info!(%addr, "claw-sync-server starting");
 
-    Server::builder()
-        .tls_config(ServerTlsConfig::new().identity(identity))?
+    let server = Server::builder();
+    let mut server = match (tls_cert_path, tls_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let cert_pem = tokio::fs::read(cert_path).await?;
+            let key_pem = tokio::fs::read(key_path).await?;
+            tracing::info!("claw-sync-server TLS enabled");
+            server.tls_config(
+                ServerTlsConfig::new().identity(Identity::from_pem(cert_pem, key_pem)),
+            )?
+        }
+        _ => {
+            tracing::warn!("CLAW_SYNC_TLS_CERT or CLAW_SYNC_TLS_KEY not set; starting without TLS");
+            server
+        }
+    };
+
+    server
         .add_service(SyncServiceServer::new(service))
         .serve(addr)
         .await?;
@@ -142,15 +133,15 @@ impl SyncService for HubService {
 
         sqlx::query(
             "INSERT INTO hub_devices (
-                device_id, workspace_id, public_key_ed25519, registered_at, last_seen, last_pull_cursor
+                id, workspace_id, public_key_ed25519, registered_at, last_seen, last_pull_cursor
             ) VALUES ($1, $2, $3, NOW(), NOW(), 0)
-            ON CONFLICT (device_id) DO UPDATE SET
+            ON CONFLICT (id) DO UPDATE SET
                 workspace_id = EXCLUDED.workspace_id,
                 public_key_ed25519 = EXCLUDED.public_key_ed25519,
                 last_seen = NOW()",
         )
-        .bind(device_id)
-        .bind(workspace_id)
+        .bind(device_id.to_string())
+        .bind(workspace_id.to_string())
         .bind(public_key)
         .execute(&self.pool)
         .await
@@ -172,10 +163,8 @@ impl SyncService for HubService {
         let mut stream = request.into_inner();
         let (tx, rx) = mpsc::channel(32);
         let pool = self.pool.clone();
-        let key_store = self.key_store.clone();
 
         tokio::spawn(async move {
-            let mut chunk_buffers: HashMap<String, Vec<DeltaChunk>> = HashMap::new();
             let mut max_seq = 0_i64;
 
             loop {
@@ -241,8 +230,7 @@ impl SyncService for HubService {
 
                 let mut rejected_chunk_ids = Vec::new();
                 for chunk in push_request.chunks {
-                    let computed_hash =
-                        claw_sync::delta::hasher::content_hash(&chunk.encrypted_payload);
+                    let chunk_bytes = chunk.encode_to_vec();
                     let expected_hash: [u8; 32] = match chunk.payload_hash.as_slice().try_into() {
                         Ok(hash) => hash,
                         Err(_) => {
@@ -250,65 +238,41 @@ impl SyncService for HubService {
                             continue;
                         }
                     };
+                    let computed_hash =
+                        claw_sync::delta::hasher::content_hash(&chunk.encrypted_payload);
                     if computed_hash != expected_hash {
                         rejected_chunk_ids.push(chunk.chunk_id.clone());
                         continue;
                     }
 
-                    let entry = chunk_buffers.entry(chunk.chunk_id.clone()).or_default();
-                    entry.push(chunk.clone());
-                    let expected_total = entry
-                        .first()
-                        .map(|current| current.total.max(0) as usize)
-                        .unwrap_or(0);
-                    if expected_total == 0 || entry.len() < expected_total {
-                        continue;
-                    }
-
-                    let ready = chunk_buffers.remove(&chunk.chunk_id).unwrap_or_default();
-                    let payload = match chunks_from_proto(ready) {
-                        Ok(payload) => payload,
+                    let seq = match sqlx::query(
+                        "INSERT INTO hub_memory_log (
+                            workspace_id, device_id, chunk_bytes, payload_hash
+                        ) VALUES ($1, $2, $3, $4)
+                        RETURNING seq",
+                    )
+                    .bind(workspace_id.to_string())
+                    .bind(device_id.to_string())
+                    .bind(match chunk_bytes.is_empty() {
+                        false => chunk_bytes,
+                        true => {
+                            rejected_chunk_ids.push(chunk.chunk_id.clone());
+                            continue;
+                        }
+                    })
+                    .bind(hex_hash(expected_hash))
+                    .fetch_one(&pool)
+                    .await
+                    {
+                        Ok(row) => row.get::<i64, _>("seq"),
                         Err(_) => {
                             rejected_chunk_ids.push(chunk.chunk_id.clone());
                             continue;
                         }
                     };
 
-                    let delta = match unpack(&payload, key_store.workspace_key()) {
-                        Ok(delta) => delta,
-                        Err(_) => {
-                            rejected_chunk_ids.push(payload.chunk_id.clone());
-                            continue;
-                        }
-                    };
-
-                    for op in delta.ops {
-                        let (op_kind, entity_id, op_payload, hlc) = op_to_hub_row(&op);
-                        let seq = match sqlx::query(
-                            "INSERT INTO hub_memory_log (
-                                workspace_id, device_id, entity_type, entity_id, op_kind, op_payload, hlc, received_at
-                            ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW())
-                            RETURNING seq",
-                        )
-                        .bind(workspace_id)
-                        .bind(device_id)
-                        .bind(delta.entity_type.to_string())
-                        .bind(entity_id)
-                        .bind(op_kind)
-                        .bind(op_payload.to_string())
-                        .bind(hlc)
-                        .fetch_one(&pool)
-                        .await
-                        {
-                            Ok(row) => row.get::<i64, _>("seq"),
-                            Err(_) => {
-                                rejected_chunk_ids.push(payload.chunk_id.clone());
-                                continue;
-                            }
-                        };
-                        if seq > max_seq {
-                            max_seq = seq;
-                        }
+                    if seq > max_seq {
+                        max_seq = seq;
                     }
                 }
 
@@ -363,14 +327,14 @@ impl SyncService for HubService {
         let max_rows = request.max_chunks.max(1) as i64;
         let since_seq = cursor.lamport_clock.max(0);
 
-        let rows = sqlx::query_as::<_, HubRow>(
-            "SELECT seq, entity_type, entity_id, op_kind, op_payload, hlc, device_id
+        let rows = sqlx::query_as::<_, HubChunkRow>(
+            "SELECT seq, chunk_bytes
              FROM hub_memory_log
              WHERE workspace_id = $1 AND seq > $2
              ORDER BY seq ASC
              LIMIT $3",
         )
-        .bind(workspace_uuid)
+        .bind(workspace_uuid.to_string())
         .bind(since_seq)
         .bind(max_rows)
         .fetch_all(&self.pool)
@@ -380,47 +344,32 @@ impl SyncService for HubService {
         let mut outbound_chunks = Vec::new();
         let mut latest_seq = since_seq;
         for row in rows {
-            let entity_type = row.entity_type.parse::<EntityType>().map_err(|_| {
+            let chunk = DeltaChunk::decode(row.chunk_bytes.as_slice()).map_err(|error| {
                 status_with_detail(
                     Code::Internal,
                     "storage",
-                    "invalid entity_type in hub_memory_log",
+                    &format!("failed to decode persisted chunk: {error}"),
                 )
             })?;
-            let op = row_to_op(&row).map_err(|error| {
-                status_with_detail(
-                    Code::Internal,
-                    "storage",
-                    &format!("failed to rehydrate op: {error}"),
-                )
-            })?;
-            let device_id = Uuid::parse_str(&row.device_id).map_err(|_| {
-                status_with_detail(
-                    Code::Internal,
-                    "storage",
-                    "invalid device_id in hub_memory_log",
-                )
-            })?;
-            let delta = DeltaSet {
-                entity_type,
-                ops: vec![op],
-                sequences: vec![row.seq],
-                device_id,
-            };
-            let payload =
-                pack(&delta, self.key_store.workspace_key(), 64 * 1024).map_err(|error| {
-                    status_with_detail(Code::Internal, "crypto", &format!("pack failed: {error}"))
-                })?;
-            outbound_chunks.extend(payload_to_proto_chunks(&payload));
+            outbound_chunks.push(chunk);
             latest_seq = row.seq;
         }
+
+        sqlx::query(
+            "UPDATE hub_devices SET last_pull_cursor = GREATEST(last_pull_cursor, $1), last_seen = NOW() WHERE id = $2",
+        )
+        .bind(latest_seq)
+        .bind(&cursor.device_id)
+        .execute(&self.pool)
+        .await
+        .map_err(database_status)?;
 
         let has_more: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                 SELECT 1 FROM hub_memory_log WHERE workspace_id = $1 AND seq > $2
             )",
         )
-        .bind(workspace_uuid)
+        .bind(workspace_uuid.to_string())
         .bind(latest_seq)
         .fetch_one(&self.pool)
         .await
@@ -470,17 +419,17 @@ impl SyncService for HubService {
             status_with_detail(Code::InvalidArgument, "validation", "invalid device_id")
         })?;
 
-        sqlx::query("UPDATE hub_devices SET last_seen = NOW() WHERE device_id = $1")
-            .bind(device_id)
+        sqlx::query("UPDATE hub_devices SET last_seen = NOW() WHERE id = $1")
+            .bind(device_id.to_string())
             .execute(&self.pool)
             .await
             .map_err(database_status)?;
 
         let row = sqlx::query(
             "SELECT COALESCE(last_pull_cursor, 0) AS last_pull_cursor
-             FROM hub_devices WHERE device_id = $1",
+               FROM hub_devices WHERE id = $1",
         )
-        .bind(device_id)
+        .bind(device_id.to_string())
         .fetch_optional(&self.pool)
         .await
         .map_err(database_status)?;
@@ -494,9 +443,13 @@ impl SyncService for HubService {
                 SELECT 1 FROM hub_memory_log WHERE workspace_id = $1 AND seq > $2
             )",
         )
-        .bind(Uuid::parse_str(&request.workspace_id).map_err(|_| {
-            status_with_detail(Code::InvalidArgument, "validation", "invalid workspace_id")
-        })?)
+        .bind(
+            Uuid::parse_str(&request.workspace_id)
+                .map_err(|_| {
+                    status_with_detail(Code::InvalidArgument, "validation", "invalid workspace_id")
+                })?
+                .to_string(),
+        )
         .bind(last_pull_cursor)
         .fetch_one(&self.pool)
         .await
@@ -509,99 +462,24 @@ impl SyncService for HubService {
     }
 }
 
-fn op_to_hub_row(op: &CrdtOp) -> (&'static str, String, serde_json::Value, String) {
-    match op {
-        CrdtOp::Insert {
-            entity_id,
-            payload,
-            hlc,
-            ..
-        } => (
-            "INSERT",
-            entity_id.clone(),
-            payload.clone(),
-            hlc.to_string(),
-        ),
-        CrdtOp::Update {
-            entity_id,
-            field_patches,
-            hlc,
-            ..
-        } => (
-            "UPDATE",
-            entity_id.clone(),
-            serde_json::to_value(field_patches).unwrap_or(serde_json::Value::Array(Vec::new())),
-            hlc.to_string(),
-        ),
-        CrdtOp::Delete { entity_id, hlc, .. } => (
-            "DELETE",
-            entity_id.clone(),
-            serde_json::Value::Null,
-            hlc.to_string(),
-        ),
-        CrdtOp::Tombstone {
-            entity_id,
-            deleted_at,
-        } => (
-            "TOMBSTONE",
-            entity_id.clone(),
-            serde_json::Value::Null,
-            deleted_at.to_string(),
-        ),
-    }
-}
-
-fn row_to_op(row: &HubRow) -> Result<CrdtOp, String> {
-    let hlc = HlcTimestamp::from_str(&row.hlc).map_err(|error| error.to_string())?;
-    let device_id = Uuid::parse_str(&row.device_id).map_err(|error| error.to_string())?;
-    match row.op_kind.as_str() {
-        "INSERT" => Ok(CrdtOp::Insert {
-            entity_id: row.entity_id.clone(),
-            payload: row.op_payload.clone(),
-            hlc,
-            device_id,
-        }),
-        "UPDATE" => Ok(CrdtOp::Update {
-            entity_id: row.entity_id.clone(),
-            field_patches: serde_json::from_value(row.op_payload.clone())
-                .map_err(|error| error.to_string())?,
-            hlc,
-            device_id,
-        }),
-        "DELETE" => Ok(CrdtOp::Delete {
-            entity_id: row.entity_id.clone(),
-            hlc,
-            device_id,
-        }),
-        "TOMBSTONE" => Ok(CrdtOp::Tombstone {
-            entity_id: row.entity_id.clone(),
-            deleted_at: hlc,
-        }),
-        other => Err(format!("unsupported op_kind: {other}")),
-    }
-}
-
 async fn ensure_hub_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
     for statement in [
         "CREATE TABLE IF NOT EXISTS hub_memory_log (
             seq BIGSERIAL PRIMARY KEY,
-            workspace_id UUID NOT NULL,
-            device_id UUID NOT NULL,
-            entity_type TEXT NOT NULL,
-            entity_id TEXT NOT NULL,
-            op_kind TEXT NOT NULL,
-            op_payload JSONB NOT NULL,
-            hlc TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            chunk_bytes BYTEA NOT NULL,
+            payload_hash TEXT NOT NULL,
             received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )",
         "CREATE INDEX IF NOT EXISTS idx_hub_memory_log_workspace_seq
          ON hub_memory_log (workspace_id, seq)",
         "CREATE TABLE IF NOT EXISTS hub_devices (
-            device_id UUID PRIMARY KEY,
+            id TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL,
             public_key_ed25519 BYTEA NOT NULL,
-            registered_at TIMESTAMPTZ NOT NULL,
-            last_seen TIMESTAMPTZ NOT NULL,
+            registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen TIMESTAMPTZ,
             last_pull_cursor BIGINT NOT NULL DEFAULT 0
         )",
     ] {
@@ -616,6 +494,15 @@ fn status_with_detail(code: Code, kind: &str, message: &str) -> Status {
         status.metadata_mut().insert("error-kind", value);
     }
     status
+}
+
+fn hex_hash(bytes: [u8; 32]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
 }
 
 fn database_status(error: sqlx::Error) -> Status {
