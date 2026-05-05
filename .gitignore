@@ -6,3 +6,4 @@ Cargo.lock
 *.sqlite-*
 *.lock
 !Cargo.lock
+.DS_Store
