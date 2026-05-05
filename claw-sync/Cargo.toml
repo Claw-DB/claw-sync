@@ -24,7 +24,7 @@ path = "src/lib.rs"
 claw-core = "0.1.2"
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.12", features = ["transport", "tls-roots"] }
-prost = "0.13"
+prost = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
