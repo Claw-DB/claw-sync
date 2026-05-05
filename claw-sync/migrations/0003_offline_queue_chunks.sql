@@ -1,9 +1,9 @@
 CREATE TABLE IF NOT EXISTS offline_queue (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     chunk_bytes BLOB NOT NULL,
     enqueued_at INTEGER NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
-    last_attempt INTEGER,
+    last_attempt_at INTEGER,
     status TEXT NOT NULL CHECK (status IN ('pending', 'failed')) DEFAULT 'pending'
 );
 

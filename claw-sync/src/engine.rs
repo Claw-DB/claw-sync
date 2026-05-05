@@ -45,7 +45,7 @@ use crate::{
         push::{PushOutcome, PushSession, PushStats},
         reconcile::{ReconcileSession, ReconcileStats},
     },
-    transport::reconnect::{ReconnectingClient, SyncEvent as TransportEvent},
+    transport::reconnect::{transport_retry, ReconnectingClient, SyncEvent as TransportEvent},
 };
 
 const REGISTRATION_FILE_NAME: &str = "device_registration.json";
@@ -421,9 +421,9 @@ impl SyncEngine {
                     if matches!(error, SyncError::Transport(_))
                         && scheduler.should_retry(retries + 1) =>
                 {
-                    let delay = scheduler.next_retry_delay(retries);
                     retries = retries.saturating_add(1);
-                    tokio::time::sleep(delay).await;
+                    tokio::time::sleep(transport_retry(self.config.retry_base_ms, retries - 1))
+                        .await;
                 }
                 Err(error) => {
                     if matches!(error, SyncError::Transport(_)) {

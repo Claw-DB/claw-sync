@@ -17,7 +17,10 @@ use crate::{
     delta::extractor::EntityType,
     error::{SyncError, SyncResult},
     queue::drain::DrainResult,
-    transport::client::{SyncChunk, SyncHubClient, TransportFailureKind},
+    transport::{
+        client::{SyncChunk, SyncHubClient, TransportFailureKind},
+        reconnect::transport_retry,
+    },
 };
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -359,7 +362,7 @@ impl OfflineQueue {
     pub async fn enqueue_chunk(&self, chunk: &SyncChunk) -> SyncResult<()> {
         let chunk_bytes = serde_json::to_vec(chunk)?;
         sqlx::query(
-            "INSERT INTO offline_queue (chunk_bytes, enqueued_at, attempts, last_attempt, status)
+            "INSERT INTO offline_queue (chunk_bytes, enqueued_at, attempts, last_attempt_at, status)
              VALUES (?, ?, 0, NULL, 'pending')",
         )
         .bind(chunk_bytes)
@@ -370,11 +373,10 @@ impl OfflineQueue {
     }
 
     /// Drains up to `max_batch` pending chunk rows and pushes them to the hub.
-    pub async fn drain_chunks(
+    pub async fn drain(
         &self,
         client: &mut SyncHubClient,
         max_batch: usize,
-        max_retries: u32,
     ) -> SyncResult<DrainResult> {
         if max_batch == 0 {
             return Ok(DrainResult::default());
@@ -397,57 +399,64 @@ impl OfflineQueue {
                 ..DrainResult::default()
             });
         }
-
-        let mut chunks = Vec::with_capacity(rows.len());
-        for row in &rows {
-            chunks.push(serde_json::from_slice::<SyncChunk>(&row.chunk_bytes)?);
-        }
-
-        let push_result = client.push_deltas(chunks).await?;
         let mut result = DrainResult::default();
 
-        for (index, row) in rows.iter().enumerate() {
-            let outcome = push_result.per_chunk.get(index);
-            match outcome.map(|current| current.accepted).unwrap_or(false) {
-                true => {
-                    sqlx::query("DELETE FROM offline_queue WHERE id = ?")
-                        .bind(row.id)
-                        .execute(&self.pool)
-                        .await?;
-                    result.delivered = result.delivered.saturating_add(1);
-                }
-                false => {
-                    let failure_kind = outcome
-                        .and_then(|current| current.failure_kind)
-                        .unwrap_or(TransportFailureKind::Transient);
-                    let next_attempts = row.attempts.saturating_add(1);
-                    let failed = next_attempts >= max_retries as i64
-                        || failure_kind == TransportFailureKind::Permanent;
-                    sqlx::query(
-                        "UPDATE offline_queue
-                         SET attempts = ?,
-                             last_attempt = ?,
-                             status = CASE WHEN ? THEN 'failed' ELSE 'pending' END
-                         WHERE id = ?",
-                    )
-                    .bind(next_attempts)
-                    .bind(Utc::now().timestamp_millis())
-                    .bind(failed)
+        for row in rows {
+            let chunk = serde_json::from_slice::<SyncChunk>(&row.chunk_bytes)?;
+            let push_result = client.push_deltas(vec![chunk]).await?;
+            let outcome = push_result.per_chunk.first();
+
+            if outcome.map(|current| current.accepted).unwrap_or(false) {
+                sqlx::query("DELETE FROM offline_queue WHERE id = ?")
                     .bind(row.id)
                     .execute(&self.pool)
                     .await?;
+                result.delivered = result.delivered.saturating_add(1);
+                continue;
+            }
 
-                    if failed {
-                        result.failed = result.failed.saturating_add(1);
-                    } else {
-                        result.retried = result.retried.saturating_add(1);
-                    }
-                }
+            let failure_kind = outcome
+                .and_then(|current| current.failure_kind)
+                .unwrap_or(TransportFailureKind::Transient);
+            let next_attempts = row.attempts.saturating_add(1);
+            let failed = next_attempts >= i64::from(client.max_retries())
+                || failure_kind == TransportFailureKind::Permanent;
+
+            sqlx::query(
+                "UPDATE offline_queue
+                 SET attempts = ?,
+                     last_attempt_at = ?,
+                     status = CASE WHEN ? THEN 'failed' ELSE 'pending' END
+                 WHERE id = ?",
+            )
+            .bind(next_attempts)
+            .bind(Utc::now().timestamp_millis())
+            .bind(failed)
+            .bind(row.id)
+            .execute(&self.pool)
+            .await?;
+
+            if failed {
+                result.failed = result.failed.saturating_add(1);
+            } else {
+                result.retried = result.retried.saturating_add(1);
+                tokio::time::sleep(transport_retry(client.retry_base_ms(), row.attempts as u32))
+                    .await;
             }
         }
 
         result.remaining_pending = self.pending_chunk_count().await?;
         Ok(result)
+    }
+
+    /// Compatibility wrapper for the legacy drain_chunks API.
+    pub async fn drain_chunks(
+        &self,
+        client: &mut SyncHubClient,
+        max_batch: usize,
+        _max_retries: u32,
+    ) -> SyncResult<DrainResult> {
+        self.drain(client, max_batch).await
     }
 
     /// Returns the number of pending chunk rows in `offline_queue`.
@@ -623,7 +632,7 @@ mod tests {
 
         queue.enqueue(&op).await.expect("enqueue should succeed");
         queue
-            .mark_done(&[op.id.clone()])
+            .mark_done(std::slice::from_ref(&op.id))
             .await
             .expect("mark done should succeed");
         sqlx::query("UPDATE sync_queue SET last_attempt_at = ? WHERE id = ?")

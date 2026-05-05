@@ -17,6 +17,7 @@ use crate::{
         scheduler::RetryScheduler,
     },
     sync::push::PushSession,
+    transport::reconnect::transport_retry,
 };
 
 /// Outcome of a single queue drain pass.
@@ -139,10 +140,9 @@ impl QueueDrainer {
                         .should_retry(op.attempt_count.saturating_add(1))
                     {
                         result.retried += 1;
-                        let delay = self.scheduler.next_retry_delay(op.attempt_count);
                         tokio::select! {
                             _ = self.shutdown.cancelled() => break,
-                            _ = time::sleep(delay) => {}
+                            _ = time::sleep(transport_retry(self.scheduler.config.retry_base_ms, op.attempt_count)) => {}
                         }
                     } else {
                         result.failed += 1;
