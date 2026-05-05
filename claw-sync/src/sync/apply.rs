@@ -586,14 +586,14 @@ async fn ensure_sync_metadata_tables(pool: &SqlitePool) -> SyncResult<()> {
             device_id TEXT NOT NULL,
             PRIMARY KEY (entity_type, entity_id, field)
         )",
-        "CREATE TABLE IF NOT EXISTS conflicts (
+        "CREATE TABLE IF NOT EXISTS sync_conflicts (
             id TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL,
             entity_type TEXT NOT NULL,
             entity_id TEXT NOT NULL,
             field_path TEXT NOT NULL,
-            local_value TEXT NOT NULL,
-            remote_value TEXT NOT NULL,
+            local_value TEXT,
+            remote_value TEXT,
             local_hlc TEXT NOT NULL,
             remote_hlc TEXT NOT NULL,
             detected_at INTEGER NOT NULL,
@@ -623,7 +623,7 @@ async fn persist_conflict_record(
     })?;
 
     sqlx::query(
-        "INSERT INTO conflicts (
+        "INSERT INTO sync_conflicts (
             id, workspace_id, entity_type, entity_id, field_path,
             local_value, remote_value, local_hlc, remote_hlc, detected_at, resolved, resolution
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)",

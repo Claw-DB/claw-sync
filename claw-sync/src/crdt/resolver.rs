@@ -2,6 +2,7 @@
 
 use serde_json::{Map, Value};
 use sqlx::SqlitePool;
+use uuid::Uuid;
 
 use crate::{
     crdt::{clock::HlcTimestamp, ops::CrdtOp},
@@ -80,27 +81,28 @@ impl ConflictResolver {
     pub async fn resolve_manual(
         &self,
         pool: &SqlitePool,
-        conflict_id: &str,
-        chosen_value: &Value,
+        conflict_id: Uuid,
+        chosen_value: Value,
         reason: &str,
     ) -> SyncResult<()> {
+        let conflict_id = conflict_id.to_string();
         let row = sqlx::query_as::<_, ManualConflictRow>(
-            "SELECT id, entity_type, entity_id, field_path FROM conflicts WHERE id = ? AND resolved = 0",
+            "SELECT id, entity_type, entity_id, field_path FROM sync_conflicts WHERE id = ? AND resolved = 0",
         )
-        .bind(conflict_id)
+        .bind(&conflict_id)
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| SyncError::Validation(format!("unknown unresolved conflict_id: {conflict_id}")))?;
 
-        apply_manual_value(pool, &row, chosen_value).await?;
+        apply_manual_value(pool, &row, &chosen_value).await?;
         sqlx::query(
-            "UPDATE conflicts
+            "UPDATE sync_conflicts
              SET resolved = 1, resolution = ?, resolved_at = ?
              WHERE id = ?",
         )
         .bind(reason)
         .bind(chrono::Utc::now().timestamp_millis())
-        .bind(conflict_id)
+        .bind(&conflict_id)
         .execute(pool)
         .await?;
 
